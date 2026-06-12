@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FaithLock Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        :root {
+            --bg: #f3effa;
+            --bg-soft: #ebe4f8;
+            --surface: #ffffff;
+            --surface-2: #faf8ff;
+            --purple-50: #f5f0ff;
+            --purple-100: #e9dfff;
+            --purple-200: #d4c4f5;
+            --purple-400: #9b7fd4;
+            --purple-500: #7c5cbf;
+            --purple-600: #6344a8;
+            --purple-700: #4f3589;
+            --ink: #2d2640;
+            --muted: #6b6280;
+            --line: rgba(124, 92, 191, 0.14);
+            --success: #3d9a6a;
+            --warn: #c4842a;
+            --danger: #c45c6a;
+            --radius: 16px;
+            --radius-sm: 10px;
+            --shadow: 0 8px 32px rgba(99, 68, 168, 0.08);
+            --sans: "DM Sans", system-ui, sans-serif;
+            --mono: "JetBrains Mono", ui-monospace, monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: var(--sans);
+            color: var(--ink);
+            background:
+                radial-gradient(ellipse 80% 50% at 50% -10%, var(--purple-100) 0%, transparent 55%),
+                linear-gradient(180deg, var(--bg) 0%, var(--bg-soft) 100%);
+        }
+
+        .app {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            min-height: 100vh;
+            max-width: 1280px;
+            margin: 0 auto;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            padding: 28px 20px;
+            border-right: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.55);
+            backdrop-filter: blur(12px);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 32px;
+        }
+
+        .brand-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--purple-500), var(--purple-700));
+            display: grid;
+            place-items: center;
+            color: #fff;
+            font-weight: 700;
+            font-size: 1.1rem;
+            box-shadow: 0 4px 14px rgba(99, 68, 168, 0.35);
+        }
+
+        .brand h1 {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .brand p {
+            margin: 2px 0 0;
+            font-size: 0.75rem;
+            color: var(--muted);
+        }
+
+        .nav-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 28px;
+        }
+
+        .nav-step {
+            display: flex;
+            gap: 12px;
+            padding: 12px 14px;
+            border-radius: var(--radius-sm);
+            border: 1px solid transparent;
+            background: transparent;
+            transition: all 0.2s ease;
+        }
+
+        .nav-step .num {
+            width: 28px;
+            height: 28px;
+            border-radius: 8px;
+            background: var(--purple-50);
+            color: var(--purple-500);
+            font-size: 0.75rem;
+            font-weight: 700;
+            display: grid;
+            place-items: center;
+            flex-shrink: 0;
+        }
+
+        .nav-step .label {
+            font-size: 0.88rem;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .nav-step .hint {
+            font-size: 0.72rem;
+            color: var(--muted);
+            line-height: 1.3;
+        }
+
+        .nav-step.active {
+            background: var(--surface);
+            border-color: var(--purple-200);
+            box-shadow: var(--shadow);
+        }
+
+        .nav-step.active .num {
+            background: linear-gradient(135deg, var(--purple-500), var(--purple-600));
+            color: #fff;
+        }
+
+        .nav-step.done .num {
+            background: var(--purple-100);
+            color: var(--purple-600);
+        }
+
+        .conn-card {
+            padding: 14px;
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            border: 1px solid var(--line);
+        }
+
+        .conn-card label {
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        #connectionPill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            background: var(--muted);
+        }
+
+        .connected .dot { background: var(--success); box-shadow: 0 0 0 3px rgba(61, 154, 106, 0.2); }
+        .connecting .dot { background: var(--warn); animation: pulse 1.2s infinite; }
+        .offline .dot { background: var(--danger); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* Main */
+        .main {
+            padding: 28px 28px 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .hero {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .hero-title {
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            font-weight: 700;
+            margin: 0 0 6px;
+            color: var(--purple-700);
+        }
+
+        .hero-sub {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        #phaseLabel {
+            padding: 8px 16px;
+            border-radius: 999px;
+            background: var(--purple-100);
+            color: var(--purple-700);
+            font-size: 0.8rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: 1.4fr 1fr;
+            gap: 18px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 22px;
+            box-shadow: var(--shadow);
+        }
+
+        .card-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 18px;
+        }
+
+        .card-head span:first-child {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .card-head span:last-child {
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            color: var(--purple-500);
+        }
+
+        .action-display {
+            text-align: center;
+            padding: 20px 12px 16px;
+            border-radius: var(--radius-sm);
+            background: linear-gradient(180deg, var(--purple-50) 0%, var(--surface-2) 100%);
+            margin-bottom: 18px;
+        }
+
+        #cameraAction {
+            font-size: clamp(1.6rem, 4vw, 2.4rem);
+            font-weight: 700;
+            margin: 0 0 6px;
+            color: var(--purple-600);
+        }
+
+        #cameraAction.left { color: #b07a2a; }
+        #cameraAction.right { color: #4a7fc4; }
+        #cameraAction.center { color: var(--success); }
+        #cameraAction.search { color: var(--danger); }
+        #cameraAction.idle { color: var(--muted); }
+
+        #cameraSub {
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            color: var(--muted);
+        }
+
+        .pan-bar {
+            position: relative;
+            height: 10px;
+            border-radius: 999px;
+            background: var(--purple-100);
+            margin-bottom: 20px;
+            overflow: visible;
+        }
+
+        .pan-bar::after {
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: -4px;
+            bottom: -4px;
+            border-left: 2px dashed var(--purple-300, #c4b0e8);
+        }
+
+        .pan-knob {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: var(--purple-500);
+            border: 3px solid #fff;
+            box-shadow: 0 2px 10px rgba(99, 68, 168, 0.3);
+            transform: translate(-50%, -50%);
+            transition: left 0.18s ease, background 0.18s ease;
+        }
+
+        .pan-knob.left { left: 12%; background: #b07a2a; }
+        .pan-knob.right { left: 88%; background: #4a7fc4; }
+        .pan-knob.center { left: 50%; background: var(--success); }
+        .pan-knob.search { left: 50%; background: var(--danger); animation: sweep 1.1s ease-in-out infinite; }
+        .pan-knob.idle { left: 50%; background: var(--purple-400); }
+
+        @keyframes sweep {
+            0%, 100% { left: 14%; }
+            50% { left: 86%; }
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+
+        .stat {
+            padding: 12px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+        }
+
+        .stat label {
+            display: block;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--muted);
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+
+        .stat strong {
+            font-family: var(--mono);
+            font-size: 1.05rem;
+            color: var(--purple-700);
+        }
+
+        #lockBanner {
+            font-size: clamp(1.3rem, 3vw, 1.75rem);
+            font-weight: 700;
+            margin: 0 0 8px;
+            color: var(--purple-700);
+        }
+
+        #lockBanner.locked { color: var(--success); }
+        #lockBanner.searching { color: var(--danger); }
+
+        #speakerLine {
+            font-size: 0.88rem;
+            color: var(--muted);
+            margin-bottom: 20px;
+        }
+
+        .settings {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .settings label {
+            font-size: 0.68rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .settings input {
+            width: 100%;
+            margin-top: 4px;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius-sm);
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            background: var(--surface-2);
+            color: var(--ink);
+        }
+
+        .settings input:focus {
+            outline: none;
+            border-color: var(--purple-400);
+            box-shadow: 0 0 0 3px rgba(124, 92, 191, 0.15);
+        }
+
+        button {
+            margin-top: 4px;
+            padding: 12px;
+            border: 0;
+            border-radius: var(--radius-sm);
+            background: linear-gradient(135deg, var(--purple-500), var(--purple-700));
+            color: #fff;
+            font-family: var(--sans);
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 20px rgba(99, 68, 168, 0.35);
+        }
+
+        .log-card { grid-column: 1 / -1; }
+
+        .log {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 220px;
+            overflow-y: auto;
+        }
+
+        .log li {
+            display: grid;
+            grid-template-columns: 76px 1fr;
+            gap: 12px;
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            font-size: 0.8rem;
+        }
+
+        .log .time {
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            color: var(--purple-500);
+        }
+
+        .tip {
+            margin-top: 20px;
+            padding: 12px 14px;
+            border-radius: var(--radius-sm);
+            background: var(--purple-50);
+            border: 1px dashed var(--purple-200);
+            font-size: 0.78rem;
+            color: var(--muted);
+            line-height: 1.5;
+        }
+
+        .tip code {
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            background: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: var(--purple-600);
+        }
+
+        @media (max-width: 900px) {
+            .app { grid-template-columns: 1fr; }
+            .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+            .cards, .stats { grid-template-columns: 1fr; }
+            .nav-steps { flex-direction: row; overflow-x: auto; }
+            .nav-step { min-width: 140px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-icon">FL</div>
+                <div>
+                    <h1>FaithLock</h1>
+                    <p>Face tracking system</p>
+                </div>
+            </div>
+
+            <nav class="nav-steps" aria-label="Workflow">
+                <article id="stepEnroll" class="nav-step">
+                    <span class="num">1</span>
+                    <div>
+                        <div class="label">Enroll</div>
+                        <div class="hint">Save Faith's face photos</div>
+                    </div>
+                </article>
+                <article id="stepLock" class="nav-step">
+                    <span class="num">2</span>
+                    <div>
+                        <div class="label">Lock</div>
+                        <div class="hint">Press L in tracker</div>
+                    </div>
+                </article>
+                <article id="stepTrack" class="nav-step">
+                    <span class="num">3</span>
+                    <div>
+                        <div class="label">Track</div>
+                        <div class="hint">Follow & search</div>
+                    </div>
+                </article>
+            </nav>
+
+            <div class="conn-card">
+                <label>Connection</label>
+                <div id="connectionPill" class="connecting">
+                    <span class="dot"></span>
+                    <span id="connectionText">Connecting</span>
+                </div>
+            </div>
+
+            <div class="tip">
+                Open via <code>http://localhost:8765</code><br>
+                Press <strong>L</strong> to lock, move to test follow.
+            </div>
+        </aside>
+
+        <main class="main">
+            <header class="hero">
+                <div>
+                    <h2 class="hero-title">Live camera control</h2>
+                    <p class="hero-sub">Watch pan commands and lock status in real time</p>
+                </div>
+                <span id="phaseLabel">Waiting</span>
+            </header>
+
+            <section class="cards">
+                <article class="card">
+                    <div class="card-head">
+                        <span>Camera movement</span>
+                        <span id="lastSeen">No data yet</span>
+                    </div>
+                    <div class="action-display">
+                        <p id="cameraAction" class="idle">Standing by</p>
+                        <p id="cameraSub">STOPPED</p>
+                    </div>
+                    <div class="pan-bar" aria-hidden="true">
+                        <div id="servoKnob" class="pan-knob idle"></div>
+                    </div>
+                    <div class="stats">
+                        <div class="stat"><label>Faces</label><strong id="facesValue">0</strong></div>
+                        <div class="stat"><label>Offset</label><strong id="errorValue">0 px</strong></div>
+                        <div class="stat"><label>FPS</label><strong id="fpsValue">-</strong></div>
+                        <div class="stat"><label>Match</label><strong id="confidenceValue">-</strong></div>
+                    </div>
+                </article>
+
+                <article class="card">
+                    <div class="card-head">
+                        <span>Speaker lock</span>
+                        <span id="messageCount">0 msgs</span>
+                    </div>
+                    <p id="lockBanner" class="waiting">Not locked yet</p>
+                    <p id="speakerLine">Target: Faith</p>
+
+                    <div class="settings">
+                        <label>WebSocket URL
+                            <input id="wsUrlInput" type="text" value="ws://157.173.101.159:9001">
+                        </label>
+                        <label>Movement topic
+                            <input id="movementTopicInput" type="text" value="vision/faithlock/movement">
+                        </label>
+                        <label>Status topic
+                            <input id="statusTopicInput" type="text" value="vision/faithlock/status">
+                        </label>
+                        <button id="connectButton" type="button">Reconnect MQTT</button>
+                    </div>
+                </article>
+
+                <article class="card log-card">
+                    <div class="card-head">
+                        <span>Activity log</span>
+                        <span>Live updates</span>
+                    </div>
+                    <ul id="eventLog" class="log" role="log"></ul>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        const MAX_LOG = 35;
+        const COMMAND_LABELS = {
+            MOVED_LEFT: "Panning left",
+            MOVED_RIGHT: "Panning right",
+            CENTERED: "Holding center",
+            SCAN: "Searching",
+            OUT_OF_FRAME: "Briefly hidden",
+            STOPPED: "Idle",
+            LEFT: "Panning left", RIGHT: "Panning right",
+            CENTER: "Holding center", SEARCH: "Searching", IDLE: "Idle",
+        };
+        const PHASE_LABELS = {
+            enroll: "Enroll", lock: "Lock", tracking: "Tracking",
+            following: "Following", searching: "Searching", reacquire: "Re-acquiring",
+        };
+
+        const els = {
+            pill: document.getElementById("connectionPill"),
+            connectionText: document.getElementById("connectionText"),
+            lastSeen: document.getElementById("lastSeen"),
+            cameraAction: document.getElementById("cameraAction"),
+            cameraSub: document.getElementById("cameraSub"),
+            servoKnob: document.getElementById("servoKnob"),
+            facesValue: document.getElementById("facesValue"),
+            errorValue: document.getElementById("errorValue"),
+            fpsValue: document.getElementById("fpsValue"),
+            confidenceValue: document.getElementById("confidenceValue"),
+            phaseLabel: document.getElementById("phaseLabel"),
+            lockBanner: document.getElementById("lockBanner"),
+            speakerLine: document.getElementById("speakerLine"),
+            wsUrlInput: document.getElementById("wsUrlInput"),
+            movementTopicInput: document.getElementById("movementTopicInput"),
+            statusTopicInput: document.getElementById("statusTopicInput"),
+            connectButton: document.getElementById("connectButton"),
+            eventLog: document.getElementById("eventLog"),
+            messageCount: document.getElementById("messageCount"),
+            stepEnroll: document.getElementById("stepEnroll"),
+            stepLock: document.getElementById("stepLock"),
+            stepTrack: document.getElementById("stepTrack"),
+        };
+
+        let client = null, msgCount = 0, lastLogKey = "";
+        let movementTopic = els.movementTopicInput.value;
+        let statusTopic = els.statusTopicInput.value;
+
+        function setConnection(state, text) {
+            els.pill.className = state;
+            els.connectionText.textContent = text;
+        }
+
+        function normalizeCmd(raw) {
+            const c = String(raw || "STOPPED").toUpperCase();
+            const map = { LEFT: "MOVED_LEFT", RIGHT: "MOVED_RIGHT", CENTER: "CENTERED", SEARCH: "SCAN", IDLE: "STOPPED", STOP: "STOPPED" };
+            const n = map[c] || c;
+            return ["MOVED_LEFT", "MOVED_RIGHT", "CENTERED", "SCAN", "STOPPED", "OUT_OF_FRAME"].includes(n) ? n : "STOPPED";
+        }
+
+        function knobClass(cmd) {
+            if (cmd === "MOVED_LEFT") return "left";
+            if (cmd === "MOVED_RIGHT") return "right";
+            if (cmd === "SCAN") return "search";
+            if (cmd === "CENTERED") return "center";
+            return "idle";
+        }
+
+        function setMovement(raw) {
+            const cmd = normalizeCmd(raw);
+            els.cameraAction.textContent = COMMAND_LABELS[cmd] || cmd;
+            els.cameraAction.className = knobClass(cmd);
+            els.cameraSub.textContent = cmd;
+            els.servoKnob.className = "pan-knob " + knobClass(cmd);
+            return cmd;
+        }
+
+        function setWorkflowPhase(phase) {
+            const p = phase || "enroll";
+            const order = ["enroll", "lock", "tracking", "following", "reacquire", "searching"];
+            const idx = Math.max(order.indexOf(p), 0);
+            els.stepEnroll.className = "nav-step" + (idx > 0 ? " done" : idx === 0 ? " active" : "");
+            els.stepLock.className = "nav-step" + (idx > 1 ? " done" : idx === 1 ? " active" : "");
+            els.stepTrack.className = "nav-step" + (idx >= 2 ? " active" : "");
+            els.phaseLabel.textContent = PHASE_LABELS[p] || p;
+        }
+
+        function addLog(text, force) {
+            if (!force && text === lastLogKey) return;
+            lastLogKey = text;
+            const li = document.createElement("li");
+            li.innerHTML = '<span class="time">' + new Date().toLocaleTimeString() + '</span><span>' + text + '</span>';
+            els.eventLog.prepend(li);
+            while (els.eventLog.children.length > MAX_LOG) els.eventLog.removeChild(els.eventLog.lastChild);
+        }
+
+        function updateStatus(s) {
+            const cmd = setMovement(s.motor_command || s.movement);
+            const phase = s.phase || "enroll";
+            setWorkflowPhase(phase);
+            els.facesValue.textContent = String(s.faces ?? 0);
+            els.errorValue.textContent = fmt(s.error_x, 1) + " px";
+            els.fpsValue.textContent = s.fps == null ? "-" : fmt(s.fps, 1);
+            els.confidenceValue.textContent = s.confidence != null ? fmt(s.confidence * 100, 0) + "%" : "-";
+
+            const locked = Boolean(s.locked);
+            const speaker = s.speaker_id || s.speaker || s.target || "Faith";
+            const visible = Boolean(s.speaker_visible ?? s.locked_face_found);
+
+            els.lockBanner.className = "";
+            if (locked && visible) {
+                els.lockBanner.textContent = "Locked on " + speaker;
+                els.lockBanner.className = "locked";
+            } else if (locked && phase === "searching") {
+                els.lockBanner.textContent = "Searching for " + speaker;
+                els.lockBanner.className = "searching";
+            } else if (locked) {
+                els.lockBanner.textContent = "Locked - finding " + speaker;
+            } else {
+                els.lockBanner.textContent = "Press L to lock";
+            }
+            els.speakerLine.textContent = "Target: " + speaker + " | " + (visible ? "in frame" : "not visible");
+            addLog((PHASE_LABELS[phase] || phase) + " - " + (COMMAND_LABELS[cmd] || cmd));
+        }
+
+        function fmt(v, d) {
+            const n = Number(v);
+            return Number.isFinite(n) ? n.toFixed(d) : "0";
+        }
+
+        function connect() {
+            if (!window.mqtt) { setConnection("offline", "MQTT.js missing"); return; }
+            if (client) { client.end(true); client = null; }
+            movementTopic = els.movementTopicInput.value.trim();
+            statusTopic = els.statusTopicInput.value.trim();
+            setConnection("connecting", "Connecting");
+            addLog("Connecting to broker", true);
+            client = mqtt.connect(els.wsUrlInput.value.trim(), {
+                clientId: "faithlock-dash-" + Math.random().toString(16).slice(2),
+                clean: true, keepalive: 30, reconnectPeriod: 3000,
+            });
+            client.on("connect", () => {
+                setConnection("connected", "Live");
+                client.subscribe([movementTopic, statusTopic], { qos: 0 });
+                addLog("Connected to FaithLock", true);
+            });
+            client.on("reconnect", () => setConnection("connecting", "Reconnecting"));
+            client.on("close", () => setConnection("offline", "Offline"));
+            client.on("error", (e) => addLog("Error: " + (e.message || "MQTT"), true));
+            client.on("message", (topic, buf) => {
+                const payload = new TextDecoder().decode(buf).trim();
+                msgCount++;
+                els.messageCount.textContent = msgCount + " msgs";
+                els.lastSeen.textContent = new Date().toLocaleTimeString();
+                if (topic === movementTopic) { setMovement(payload); return; }
+                if (topic === statusTopic) {
+                    try { updateStatus(JSON.parse(payload)); }
+                    catch { addLog("Invalid status JSON", true); }
+                }
+            });
+        }
+
+        els.connectButton.addEventListener("click", connect);
+        connect();
+    </script>
+</body>
+</html>

@@ -1,0 +1,446 @@
+# src/enroll.py
+"""
+enroll.py
+Enrollment tool using your working pipeline:
+camera -> Haar detection -> FaceMesh 5pt -> align_face_5pt (112x112) -> ArcFace embedding
+Stores template per identity (mean embedding, L2-normalized).
+Re-enroll behavior:
+- If data/enroll/<name> already contains aligned crops, those are loaded,
+embedded again, and INCLUDED in the template. New captures are appended.
+Outputs:
+- data/db/face_db.npz (name -> embedding vector)
+- data/db/face_db.json (metadata)
+Optional:
+- data/enroll/<name>/*.jpg aligned face crops
+Controls:
+- SPACE: capture one sample (if face found)
+- a: auto-capture toggle (captures periodically)
+- s: save enrollment (after enough total samples)
+- r: reset NEW samples (keeps existing crops on disk)
+- q: quit
+"""
+from __future__ import annotations
+import argparse
+import json
+import shutil
+import time
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import cv2
+import numpy as np
+from .camera_utils import ROTATE_MODES, apply_camera_orientation, configure_low_latency_capture
+from .haar_5pt import Haar5ptDetector, align_face_5pt
+from .embed import ArcFaceEmbedderONNX
+
+# -------------------------
+# Config
+# -------------------------
+@dataclass
+class EnrollConfig:
+    out_db_npz: Path = Path("data/db/face_db.npz")
+    out_db_json: Path = Path("data/db/face_db.json")
+    save_crops: bool = True
+    crops_dir: Path = Path("data/enroll")
+    samples_needed: int = 12  # recommended; save when ready with --min-samples
+    min_samples_to_save: int = 8
+    auto_capture_every_s: float = 0.25
+    max_existing_crops: int = 300
+    # UI
+    window_main: str = "enroll"
+    window_aligned: str = "aligned_112"
+
+# -------------------------
+# DB helpers
+# -------------------------
+def ensure_dirs(cfg: EnrollConfig) -> None:
+    cfg.out_db_npz.parent.mkdir(parents=True, exist_ok=True)
+    cfg.out_db_json.parent.mkdir(parents=True, exist_ok=True)
+    if cfg.save_crops:
+        cfg.crops_dir.mkdir(parents=True, exist_ok=True)
+
+def load_db(cfg: EnrollConfig) -> Dict[str, np.ndarray]:
+    if cfg.out_db_npz.exists():
+        try:
+            data = np.load(cfg.out_db_npz, allow_pickle=True)
+            return {k: data[k].astype(np.float32) for k in data.files}
+        except Exception as e:
+            print(f"Warning: Failed to load database {cfg.out_db_npz}: {e}. Starting with empty DB.")
+            return {}
+    return {}
+
+def save_db(cfg: EnrollConfig, db: Dict[str, np.ndarray], meta: dict) -> None:
+    ensure_dirs(cfg)
+    np.savez(cfg.out_db_npz, **{k: v.astype(np.float32) for k, v in db.items()})
+    cfg.out_db_json.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+def mean_embedding(embeddings: List[np.ndarray]) -> np.ndarray:
+    """Mean + L2 normalize."""
+    E = np.stack([e.reshape(-1) for e in embeddings], axis=0).astype(np.float32)
+    m = E.mean(axis=0)
+    m = m / (np.linalg.norm(m) + 1e-12)
+    return m.astype(np.float32)
+
+# -------------------------
+# Crops loader
+# -------------------------
+def _list_existing_crops(person_dir: Path, max_count: int) -> List[Path]:
+    if not person_dir.exists():
+        return []
+    files = sorted([p for p in person_dir.glob("*.jpg") if p.is_file()])
+    if len(files) > max_count:
+        files = files[-max_count:]
+    return files
+
+def load_existing_samples_from_crops(
+    cfg: EnrollConfig,
+    emb: ArcFaceEmbedderONNX,
+    person_dir: Path,
+) -> List[np.ndarray]:
+    """
+    Reads aligned crops from disk and re-embeds them.
+    """
+    if not cfg.save_crops:
+        return []
+    crops = _list_existing_crops(person_dir, cfg.max_existing_crops)
+    base: List[np.ndarray] = []
+    for p in crops:
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        try:
+            r = emb.embed(img)
+            base.append(r.embedding)
+        except Exception:
+            continue
+    return base
+
+# -------------------------
+# UI helpers
+# -------------------------
+def _estimate_brightness(img_bgr_112: Optional[np.ndarray]) -> Tuple[float, str]:
+    """
+    Rough brightness estimator for the aligned 112x112 crop.
+    Returns (mean_luma_0_255, qualitative_label).
+    """
+    if img_bgr_112 is None or img_bgr_112.size == 0:
+        return 0.0, "no face"
+    gray = cv2.cvtColor(img_bgr_112, cv2.COLOR_BGR2GRAY)
+    m = float(gray.mean())
+    if m < 30:
+        label = "VERY DARK"
+    elif m < 55:
+        label = "DARK"
+    elif m < 120:
+        label = "OK"
+    else:
+        label = "BRIGHT"
+    return m, label
+
+
+def draw_text_with_shadow(
+    img: np.ndarray,
+    text: str,
+    pos: Tuple[int, int],
+    font_scale: float = 0.7,
+    color: Tuple[int, int, int] = (255, 255, 255),
+    thickness: int = 1,
+    shadow_offset: int = 1,
+    shadow_color: Tuple[int, int, int] = (0, 0, 0),
+    font: int = cv2.FONT_HERSHEY_DUPLEX,
+) -> None:
+    """Draw text with shadow for better readability."""
+    x, y = pos
+    # Draw shadow (lighter shadow for less bold appearance)
+    for dx, dy in [(shadow_offset, shadow_offset), (-shadow_offset, shadow_offset), 
+                   (shadow_offset, -shadow_offset), (-shadow_offset, -shadow_offset)]:
+        cv2.putText(img, text, (x + dx, y + dy), font, font_scale, shadow_color, thickness, cv2.LINE_AA)
+    # Draw main text
+    cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+
+
+def draw_status(
+    frame: np.ndarray,
+    name: str,
+    base_count: int,
+    new_count: int,
+    needed: int,
+    auto: bool,
+    msg: str = "",
+    brightness_label: str = "",
+    brightness_value: float = 0.0,
+) -> None:
+    total = base_count + new_count
+    lines = [
+        f"📝 ENROLL: {name}",
+        f"Existing: {base_count} | New: {new_count} | Total: {total} / {needed}",
+        f"Auto: {'🟢 ON' if auto else '⚪ OFF'} (toggle: a)",
+        "SPACE = save photo when ready  |  S = finish enrollment  |  Q = quit",
+    ]
+    if brightness_label:
+        # Color code brightness
+        if brightness_label == "VERY DARK":
+            bright_color = (100, 100, 255)  # Red tint
+        elif brightness_label == "DARK":
+            bright_color = (100, 150, 255)  # Orange tint
+        elif brightness_label == "OK":
+            bright_color = (150, 255, 150)  # Green tint
+        else:
+            bright_color = (200, 255, 200)  # Bright green
+        lines.append(f"💡 Lighting: {brightness_label} (mean={brightness_value:.0f})")
+    if msg:
+        lines.insert(0, msg)
+    # draw with modern font and shadow
+    y = 35
+    for i, line in enumerate(lines):
+        # Use different colors for different line types
+        if i == 0 and msg:
+            color = (255, 200, 100)  # Orange for status messages
+        elif "ENROLL" in line:
+            color = (200, 255, 200)  # Light green for header
+        elif "Lighting" in line:
+            color = bright_color if brightness_label else (200, 200, 200)
+        elif "Auto" in line:
+            color = (100, 255, 100) if auto else (200, 200, 200)
+        else:
+            color = (255, 255, 255)  # White for controls
+        draw_text_with_shadow(frame, line, (12, y), 0.7, color, 1, font=cv2.FONT_HERSHEY_DUPLEX)
+        y += 28
+
+# -------------------------
+# Main
+# -------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="Enroll a single authorized speaker.")
+    parser.add_argument("--name", default="Faith", help="Speaker name to enroll (default: Faith).")
+    parser.add_argument("--camera-index", type=int, default=1, help="USB camera index (pan cam = usually 1).")
+    parser.add_argument("--camera-rotate", choices=ROTATE_MODES, default="180", help="Fix upside-down mount.")
+    parser.add_argument("--camera-width", type=int, default=640)
+    parser.add_argument("--camera-height", type=int, default=480)
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete existing crops/DB entry for this speaker before enrolling.",
+    )
+    parser.add_argument(
+        "--quick-auto",
+        action="store_true",
+        help="Auto-capture samples then save and exit (face must stay in frame).",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=8,
+        help="Minimum photos before S can save (default: 8). Aim for 12+ for best tracking.",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    cfg = EnrollConfig()
+    cfg.min_samples_to_save = int(max(3, args.min_samples))
+    ensure_dirs(cfg)
+    name = (args.name or input("Enter person name to enroll (e.g., Demo): ")).strip()
+    if not name:
+        print("No name provided. Exiting.")
+        return
+
+    if args.fresh:
+        person_dir = cfg.crops_dir / name
+        if person_dir.exists():
+            shutil.rmtree(person_dir)
+        db = load_db(cfg)
+        if name in db:
+            del db[name]
+            save_db(cfg, db, {"names": sorted(db.keys()), "note": f"Removed {name} for fresh enroll"})
+        if cfg.out_db_npz.exists() and not load_db(cfg):
+            cfg.out_db_npz.unlink(missing_ok=True)
+        print(f"[enroll] Fresh start for '{name}'")
+
+    # Pipeline (your working practical stack)
+    det = Haar5ptDetector(min_size=(70, 70), smooth_alpha=0.80, debug=False)
+    emb = ArcFaceEmbedderONNX(model_path="models/embedder_arcface.onnx", input_size=(112, 112), debug=False)
+    db = load_db(cfg)
+    person_dir = cfg.crops_dir / name
+    if cfg.save_crops:
+        person_dir.mkdir(parents=True, exist_ok=True)
+    
+    base_samples: List[np.ndarray] = load_existing_samples_from_crops(cfg, emb, person_dir)
+    new_samples: List[np.ndarray] = []
+    status_msg = ""
+    if base_samples:
+        status_msg = f"Loaded {len(base_samples)} existing samples from disk."
+    
+    auto = bool(args.quick_auto)
+    last_auto = 0.0
+    cap = cv2.VideoCapture(int(args.camera_index))
+    if not cap.isOpened():
+        raise RuntimeError(f"Failed to open camera index {args.camera_index}.")
+    configure_low_latency_capture(cap, width=args.camera_width, height=args.camera_height)
+    
+    cv2.namedWindow(cfg.window_main, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(cfg.window_aligned, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(cfg.window_aligned, 240, 240)
+    
+    print("\n" + "=" * 60)
+    print(f"  ENROLL: {name}")
+    print("=" * 60)
+    print(f"Camera: index {args.camera_index}, rotate {args.camera_rotate}, {args.camera_width}x{args.camera_height}")
+    if base_samples:
+        print(f"Re-enroll mode: found {len(base_samples)} existing samples in {person_dir}/")
+    print(f"\nOnly {name} should be in frame. Turn your head slightly between photos.")
+    if args.quick_auto:
+        print(f"Quick-auto: capturing {cfg.samples_needed} samples, then saving...")
+    else:
+        print(f"\nWhen YOU are ready:")
+        print("  SPACE  — save one face photo")
+        print(f"  S      — finish when you have at least {cfg.min_samples_to_save} photos (12+ recommended)")
+        print("  R      — discard new photos (keeps old ones on disk)")
+        print("  Q      — quit without saving\n")
+    
+    t0 = time.time()
+    frames = 0
+    fps: Optional[float] = None
+    
+    # Simple heuristic: avoid auto-capturing when lighting is extremely dark.
+    # Manual capture is still allowed, but UI will warn about low light.
+    min_auto_brightness = 35.0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            frame = apply_camera_orientation(frame, args.camera_rotate)
+            vis = frame.copy()
+            faces = det.detect(frame, max_faces=1)
+            aligned: Optional[np.ndarray] = None
+            brightness_value = 0.0
+            brightness_label = ""
+            
+            if faces:
+                f = faces[0]
+                # draw bbox + kps
+                cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
+                for (x, y) in f.kps.astype(int):
+                    cv2.circle(vis, (int(x), int(y)), 3, (0, 255, 0), -1)
+                aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
+                brightness_value, brightness_label = _estimate_brightness(aligned)
+                cv2.imshow(cfg.window_aligned, aligned)
+            else:
+                cv2.imshow(cfg.window_aligned, np.zeros((112, 112, 3), dtype=np.uint8))
+            
+            # auto capture
+            now = time.time()
+            if auto and aligned is not None and (now - last_auto) >= cfg.auto_capture_every_s:
+                # Skip auto-capture in extremely dark conditions to avoid noisy templates.
+                if brightness_label in ("VERY DARK", "DARK"):
+                    status_msg = f"Lighting too low for auto-capture ({brightness_label})."
+                else:
+                    r = emb.embed(aligned)
+                    new_samples.append(r.embedding)
+                    last_auto = now
+                    status_msg = f"Auto captured NEW ({len(new_samples)})"
+                    if cfg.save_crops:
+                        fn = person_dir / f"{int(now * 1000)}.jpg"
+                        cv2.imwrite(str(fn), aligned)
+            
+            # FPS
+            frames += 1
+            dt = time.time() - t0
+            if dt >= 1.0:
+                fps = frames / dt
+                frames = 0
+                t0 = time.time()
+            
+            if fps is not None:
+                draw_text_with_shadow(vis, f"FPS: {fps:.1f}", (12, vis.shape[0] - 15),
+                                    0.75, (150, 255, 150), 1, font=cv2.FONT_HERSHEY_DUPLEX)
+            
+            draw_status(
+                vis,
+                name=name,
+                base_count=len(base_samples),
+                new_count=len(new_samples),
+                needed=cfg.samples_needed,
+                auto=auto,
+                msg=status_msg,
+                brightness_label=brightness_label,
+                brightness_value=brightness_value,
+            )
+            
+            cv2.imshow(cfg.window_main, vis)
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord("q"):
+                break
+            if key == ord("a"):
+                auto = not auto
+                status_msg = f"Auto mode {'ON' if auto else 'OFF'}"
+            if key == ord("r"):
+                new_samples.clear()
+                status_msg = "NEW samples reset (existing kept)"
+            if key == ord(" "): # SPACE
+                if aligned is None:
+                    status_msg = "No face detected. Not captured."
+                else:
+                    # Allow manual capture even in darker conditions but warn the user.
+                    if brightness_label in ("VERY DARK", "DARK"):
+                        status_msg = f"Captured NEW in low light ({brightness_label}). Consider adding brighter samples."
+                    else:
+                        status_msg = f"Captured NEW ({len(new_samples) + 1})"
+                    r = emb.embed(aligned)
+                    new_samples.append(r.embedding)
+                    if cfg.save_crops:
+                        fn = person_dir / f"{int(time.time() * 1000)}.jpg"
+                        cv2.imwrite(str(fn), aligned)
+            if key == ord("s"):
+                total = len(base_samples) + len(new_samples)
+                if total < cfg.min_samples_to_save:
+                    status_msg = f"Need {cfg.min_samples_to_save - total} more photo(s) before saving (have {total})."
+                    continue
+                all_samples = base_samples + new_samples
+                template = mean_embedding(all_samples)
+                db[name] = template
+                meta = {
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "embedding_dim": int(template.size),
+                    "names": sorted(db.keys()),
+                    "samples_existing_used": int(len(base_samples)),
+                    "samples_new_used": int(len(new_samples)),
+                    "samples_total_used": int(len(all_samples)),
+                    "note": "Embeddings are L2-normalized vectors. Matching uses cosine similarity.",
+                }
+                save_db(cfg, db, meta)
+                status_msg = f"Saved '{name}' to DB. Total identities: {len(db)}"
+                print(status_msg)
+                # reload base from disk so UI matches reality
+                base_samples = load_existing_samples_from_crops(cfg, emb, person_dir)
+                new_samples.clear()
+                if args.quick_auto:
+                    break
+
+            if args.quick_auto and len(base_samples) + len(new_samples) >= cfg.samples_needed:
+                total = len(base_samples) + len(new_samples)
+                all_samples = base_samples + new_samples
+                template = mean_embedding(all_samples)
+                db[name] = template
+                meta = {
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "embedding_dim": int(template.size),
+                    "names": sorted(db.keys()),
+                    "samples_total_used": int(len(all_samples)),
+                    "note": "Quick-auto enrollment",
+                }
+                save_db(cfg, db, meta)
+                print(f"Quick-auto saved '{name}' with {total} samples.")
+                break
+    finally:
+        det.close()
+        cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
