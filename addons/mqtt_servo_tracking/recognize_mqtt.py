@@ -532,12 +532,27 @@ class FaceDBMatcher:
         self.db = load_db_npz(path)
         self._rebuild()
 
-    def match(self, emb: np.ndarray) -> MatchResult:
+    def match(self, emb: np.ndarray, target_name: Optional[str] = None) -> MatchResult:
         if self._mat is None or len(self._names) == 0:
             return MatchResult(name=None, distance=1.0, similarity=0.0, accepted=False)
-        e = emb.reshape(1, -1).astype(np.float32) # (1,D)
-        # cosine similarity since both sides are normalized: sim = dot
-        sims = (self._mat @ e.T).reshape(-1) # (K,)
+        e = emb.reshape(-1).astype(np.float32)
+
+        if target_name is not None:
+            if target_name not in self.db:
+                return MatchResult(name=None, distance=1.0, similarity=0.0, accepted=False)
+            ref = self.db[target_name].reshape(-1).astype(np.float32)
+            best_sim = float(np.dot(ref, e))
+            best_dist = 1.0 - best_sim
+            ok = best_dist <= self.dist_thresh
+            return MatchResult(
+                name=target_name,
+                distance=float(best_dist),
+                similarity=float(best_sim),
+                accepted=bool(ok),
+            )
+
+        # Global best match across all enrolled identities (enrollment / multi-ID browse).
+        sims = (self._mat @ e.reshape(-1, 1)).reshape(-1)
         best_i = int(np.argmax(sims))
         best_sim = float(sims[best_i])
         best_dist = 1.0 - best_sim
@@ -951,6 +966,12 @@ def parse_args() -> argparse.Namespace:
         help="Same as default: manual lock with L key.",
     )
     parser.add_argument(
+        "--lock-timeout-sec",
+        type=float,
+        default=40.0,
+        help="Unlock if the locked speaker is not seen for this many seconds (default: 40).",
+    )
+    parser.add_argument(
         "--evidence-log",
         action="store_true",
         default=True,
@@ -996,6 +1017,7 @@ def main():
     args.search_delay_sec = float(max(0.0, args.search_delay_sec))
     args.mqtt_min_interval = float(max(0.0, args.mqtt_min_interval))
     args.mqtt_status_min_interval = float(max(0.0, args.mqtt_status_min_interval))
+    args.lock_timeout_sec = float(max(1.0, args.lock_timeout_sec))
     args.center_exit_hysteresis_px = float(max(0.0, args.center_exit_hysteresis_px))
     db_path = Path("data/db/face_db.npz")
     os.makedirs("logs", exist_ok=True)
@@ -1031,17 +1053,19 @@ def main():
         det.close()
         return
     
-    # Stricter threshold when only one speaker is enrolled — reduces false locks on other people.
-    # 0.24 distance = 0.76 cosine similarity: strangers rarely exceed ~0.5 sim with a good template,
-    # so if the authorized speaker is missed at this level, re-enroll with more samples (15+) in the
-    # same lighting/camera used for tracking. Adjustable live with +/-.
-    single_speaker_thresh = 0.24 if len(db) == 1 else 0.32
+    # When --speaker-name is set, match only that template (ignore other enrolled IDs).
+    single_speaker_thresh = 0.24 if (len(db) == 1 or args.speaker_name) else 0.32
     matcher = FaceDBMatcher(db=db, dist_thresh=single_speaker_thresh)
     speaker_name = resolve_speaker_name(db, args.speaker_name)
     if speaker_name is None:
         print("Error: No authorized speaker configured. Enroll with src.enroll and use --speaker-name.")
         det.close()
         return
+    if len(db) > 1 and args.speaker_name:
+        others = [n for n in sorted(db.keys()) if n != speaker_name]
+        print(f"Tracking '{speaker_name}' only — other enrolled IDs ignored: {others}")
+        print(f"Match threshold: dist<={matcher.dist_thresh:.2f} (sim>={1.0 - matcher.dist_thresh:.2f})")
+        print("If not recognized, press '-' to loosen threshold or re-enroll with more photos.")
 
     evidence: Optional[EvidenceLogger] = None
     if args.evidence_log:
@@ -1075,6 +1099,7 @@ def main():
     print(f"Authorized speaker: {speaker_name}")
     print(f"Auto-lock speaker: {'ON' if args.auto_lock_speaker else 'OFF - press L to lock'}")
     print(f"Search when lost: {'ON (SCAN until reacquire)' if args.allow_scan else 'OFF (hold pan)'}")
+    print(f"Auto-unlock after: {args.lock_timeout_sec:.0f}s without seeing locked speaker")
     print("Controls: L=lock/unlock | A/F or arrow keys=select face | q=quit | r=reload DB | +/- threshold")
     print("Motor commands: MOVED_LEFT | MOVED_RIGHT | CENTERED | STOPPED | SCAN | OUT_OF_FRAME")
     print(
@@ -1119,7 +1144,7 @@ def main():
     
     # Face locking state
     face_lock: Optional[FaceLock] = None
-    max_timeout = 40.0  # seconds before unlocking if face is lost
+    lock_timeout_sec = float(args.lock_timeout_sec)
     
     # Face selection for locking (when multiple faces present)
     selected_face_index: Optional[int] = None  # Index of currently selected face (None = auto-select first)
@@ -1167,15 +1192,13 @@ def main():
             y0 = 80
             shown = 0
             
-            # Check if we should unlock due to timeout
+            # Unlock if locked speaker not seen for lock_timeout_sec (even during SCAN)
             current_time = time.time()
-            if (
-                face_lock
-                and not args.allow_scan
-                and (current_time - face_lock.last_seen) > max_timeout
-            ):
+            if face_lock and (current_time - face_lock.last_seen) > lock_timeout_sec:
                 save_action_history(face_lock.target_name, face_lock.history)
-                print(f"[FaceLock] Timeout - Unlocked {face_lock.target_name}")
+                print(
+                    f"[FaceLock] Timeout ({lock_timeout_sec:.0f}s) - Unlocked {face_lock.target_name}"
+                )
                 face_lock = None
                 selected_face_index = None
                 potential_face_to_lock = None
@@ -1250,7 +1273,7 @@ def main():
                     else:
                         emb = emb_raw
 
-                    mr = matcher.match(emb)
+                    mr = matcher.match(emb, target_name=speaker_name)
                     view = classify_face(
                         speaker_name=speaker_name,
                         matched_name=mr.name,
@@ -1663,7 +1686,7 @@ def main():
                     face_lost_streak = 0
                     last_scan_publish_at = 0.0
                     print(f"[SpeakerLock] Locked onto {name} (face {selected_face_index + 1 if selected_face_index is not None else '?'})")
-                    print("[SpeakerLock] Tracking active. Leave frame to trigger SEARCH sweep.")
+                    print("[SpeakerLock] Tracking active. Leave frame to trigger SEARCH; auto-unlock after 40s absent.")
             
             cv2.imshow("BENAX Speaker Tracking - Press 'q' to quit", vis)
     finally:

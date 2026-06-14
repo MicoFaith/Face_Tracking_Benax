@@ -4,8 +4,8 @@
 #include <Servo.h>
 
 // Wi-Fi settings
-const char* WIFI_SSID = "MW40V_11E5";
-const char* WIFI_PASSWORD = "raphael159";
+const char* WIFI_SSID = "Peace And Love Ploclaimers";
+const char* WIFI_PASSWORD = "loveisthekey";
 
 // MQTT settings
 const char* MQTT_SERVER = "157.173.101.159";
@@ -17,7 +17,7 @@ const uint8_t SERVO_PIN = 14; // D5
 const int SERVO_MIN_ANGLE = 0;
 const int SERVO_MAX_ANGLE = 180;
 const int SERVO_CENTER_ANGLE = 90;
-const int TRACK_STEP = 4;             // degrees moved per LEFT/RIGHT command (higher = faster tracking)
+const int TRACK_STEP = 5;             // degrees moved per LEFT/RIGHT command (higher = faster tracking)
 const int SEARCH_STEP = 1;            // 1-degree steps = smooth sweep (no jerky jumps)
 const unsigned long TRACK_INTERVAL_MS = 50;
 const unsigned long SEARCH_INTERVAL_MS = 15; // 1 deg / 15 ms = ~65 deg/s sweep (180 in ~2.8s)

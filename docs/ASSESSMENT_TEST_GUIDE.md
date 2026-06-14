@@ -2,7 +2,7 @@
 
 Use this guide to demonstrate to assessors that every integrated-system requirement is implemented and working. Each test maps to a **task activity**, **feature**, or **validation scenario** from the BENAX brief.
 
-Related documentation: [BENAX_INTEGRATED_SYSTEM.md](BENAX_INTEGRATED_SYSTEM.md)
+Related documentation: [BENAX_INTEGRATED_SYSTEM.md](BENAX_INTEGRATED_SYSTEM.md) · [MANUAL_TEST_GUIDE.md](MANUAL_TEST_GUIDE.md)
 
 ---
 
@@ -247,7 +247,7 @@ Servo should move without face AI running.
 
 **Requirement:** Temporary occlusion → controlled search → same speaker re-locked.
 
-**Default:** search on lost enabled (`--allow-scan`); SCAN after brief confirm + ~1 s delay.
+**Default:** search on lost enabled (`--allow-scan`); SCAN after brief confirm + ~1 s delay. Lock auto-releases after **40 s** without seeing the speaker (`--lock-timeout-sec`, default 40).
 
 ### Test E1 — Brief occlusion
 
@@ -266,7 +266,7 @@ Servo should move without face AI running.
 | 3 | Tracking window | `[SEARCH] Sweeping for Faith` |
 | 4 | Dashboard | Phase: **Searching**; servo sweeps |
 | 5 | Faith returns to frame | Auto re-acquire; tracking resumes |
-| 6 | Console | Lock **not** dropped during search |
+| 6 | Console | After **40 s** absent: auto-unlock; press **L** to lock again |
 
 ### Pass criteria
 

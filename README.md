@@ -67,7 +67,7 @@ flowchart LR
 
 Full integrated-system documentation (hardware platform, pipeline flowcharts, validation checklist, evidence format):
 
-**[docs/BENAX_INTEGRATED_SYSTEM.md](docs/BENAX_INTEGRATED_SYSTEM.md)** · **[docs/ASSESSMENT_TEST_GUIDE.md](docs/ASSESSMENT_TEST_GUIDE.md)** (demo script for assessors)
+**[docs/BENAX_INTEGRATED_SYSTEM.md](docs/BENAX_INTEGRATED_SYSTEM.md)** · **[docs/MANUAL_TEST_GUIDE.md](docs/MANUAL_TEST_GUIDE.md)** (enroll → lock → track) · **[docs/ASSESSMENT_TEST_GUIDE.md](docs/ASSESSMENT_TEST_GUIDE.md)** (assessment demo)
 
 Validate installation and policy logic:
 
@@ -84,6 +84,7 @@ python addons/mqtt_servo_tracking/validate_system.py
 | `src/speaker_protocol.py` | BENAX motor commands + evidence logging |
 | `src/speaker_recognition.py` | Single-speaker policy — identify only enrolled speaker |
 | `docs/BENAX_INTEGRATED_SYSTEM.md` | Platform diagram, pipeline, validation, safety |
+| `docs/MANUAL_TEST_GUIDE.md` | Step-by-step enroll, lock, track with commands |
 | `docs/ASSESSMENT_TEST_GUIDE.md` | Step-by-step assessment demonstration & pass criteria |
 | `addons/mqtt_servo_tracking/validate_system.py` | Automated validation report |
 | `src/rebuild_db.py` | Rebuild `data/db/face_db.npz` from crops |
